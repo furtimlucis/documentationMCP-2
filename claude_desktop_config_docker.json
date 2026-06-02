@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "documentation-reader": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "documentation-reader-mcp"]
+    }
+  }
+}

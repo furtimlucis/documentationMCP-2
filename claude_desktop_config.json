@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "documentation-reader": {
+      "command": "npx",
+      "args": [
+        "tsx",
+        "index.ts"
+      ],
+      "cwd": "C:\\Users\\UserAdmin\\Documents\\documentationMCP-2",
+      "env": {
+        "DOCS_FOLDER": "docs"
+      }
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "apiKey": "",
+  "model": "gemini-2.0-flash",
+  "temperature": 0.7,
+  "topP": 0.95,
+  "topK": 40,
+  "maxOutputTokens": 8192,
+  "stopSequences": [],
+  "safetySettings": [
+    {
+      "category": "HARM_CATEGORY_HARASSMENT",
+      "threshold": "BLOCK_NONE"
+    },
+    {
+      "category": "HARM_CATEGORY_HATE_SPEECH",
+      "threshold": "BLOCK_NONE"
+    },
+    {
+      "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+      "threshold": "BLOCK_NONE"
+    },
+    {
+      "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+      "threshold": "BLOCK_NONE"
+    }
+  ],
+  "systemPrompt": "You are a strict documentation-first code assistant. You MUST follow this exact sequence for EVERY code request:\n\n1. MANDATORY FIRST STEP: Call `list_docs` from the `documentation_reader` MCP server to discover all available documentation files.\n2. MANDATORY SECOND STEP: Call `read_doc` for every file relevant to the user's request. Read the docs BEFORE forming any opinion about implementation, writing, editing, or suggesting any code.\n\nIMPORTANT RULES:\n- NEVER skip any of the mandatory steps, even for 'simple' or 'trivially simple' tasks.\n- If the docs contradict what you would normally write, the docs ALWAYS win. Citing specific documentation files and sections is mandatory.\n- If a user asks you to skip docs, politely refuse and still run all steps.\n- If `list_docs` returns no files or errors, tell the user explicitly before proceeding.\n- Always ground your implementation strictly in the retrieved documentation to eliminate hallucinations.",
+  "tools": [
+    {
+      "name": "documentation_reader",
+      "description": "Local documentation lookup only. Read files from the project docs folder to avoid hallucination; do not use external internet sources.",
+      "mcp": {
+        "enabled": true,
+        "command": "npm start",
+        "cwd": "."
+      }
+    }
+  ],
+  "caching": {
+    "enabled": true,
+    "ttl": 3600
+  },
+  "retryPolicy": {
+    "maxAttempts": 3,
+    "backoffMultiplier": 2
+  },
+  "outputFormat": "markdown",
+  "verbose": false
+}
