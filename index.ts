@@ -169,13 +169,18 @@ function parseJsonl(raw: string, originFile: string, originSha: string, source: 
     if (!trimmed) continue;
     try {
       const obj = JSON.parse(trimmed);
-      if (typeof obj.filename !== "string" || typeof obj.content !== "string") {
-        console.error(`[JSONL] ${originFile}: skipping line — missing filename or content`);
+      // Support two formats:
+      //   Standard:  { filename, content, source_tag? }
+      //   Chunked:   { heading_path, text, source_md?, source_url? }
+      const filename: string = obj.filename ?? obj.heading_path;
+      const content: string = obj.content ?? obj.text;
+      if (typeof filename !== "string" || typeof content !== "string") {
+        console.error(`[JSONL] ${originFile}: skipping line — missing filename/heading_path or content/text`);
         continue;
       }
       records.push({
-        filename: obj.filename,
-        content: obj.content,
+        filename,
+        content,
         source: typeof obj.source_tag === "string" ? obj.source_tag : source,
         origin_file: originFile,
         origin_sha: originSha,
