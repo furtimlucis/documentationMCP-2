@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "documentation-reader-mcp.fullname" . }}
+  labels:
+    {{- include "documentation-reader-mcp.labels" . | nindent 4 }}
+data:
+  GITHUB_OWNER: {{ .Values.env.GITHUB_OWNER | quote }}
+  GITHUB_REPO: {{ .Values.env.GITHUB_REPO | quote }}
+  GITHUB_BRANCH: {{ .Values.env.GITHUB_BRANCH | quote }}
+  GITHUB_DOCS_PATH: {{ .Values.env.GITHUB_DOCS_PATH | quote }}
+  GITLAB_HOST: {{ .Values.env.GITLAB_HOST | quote }}
+  GITLAB_NAMESPACE: {{ .Values.env.GITLAB_NAMESPACE | quote }}
+  GITLAB_REPO: {{ .Values.env.GITLAB_REPO | quote }}
+  GITLAB_BRANCH: {{ .Values.env.GITLAB_BRANCH | quote }}
+  GITLAB_DOCS_PATH: {{ .Values.env.GITLAB_DOCS_PATH | quote }}
+  DOCS_FOLDER: {{ .Values.env.DOCS_FOLDER | quote }}
+  SYNC_INTERVAL_MINUTES: {{ .Values.env.SYNC_INTERVAL_MINUTES | quote }}
+  LANCEDB_PATH: {{ .Values.lancedb.path | quote }}

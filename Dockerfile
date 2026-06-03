@@ -2,19 +2,20 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Copy package configurations
 COPY package*.json ./
-
-# Install all dependencies (including devDependencies like tsx/typescript)
 RUN npm ci
 
-# Copy the server script and the default docs directory
 COPY index.ts ./
 COPY docs ./docs
 
-# Set environment variables
 ENV NODE_ENV=production
 ENV DOCS_FOLDER=docs
+ENV LANCEDB_PATH=/data/lancedb
+ENV SYNC_INTERVAL_MINUTES=60
 
-# Run using npx tsx directly to avoid npm start log noise
+# /data/lancedb — mount a persistent volume here so the cache survives restarts
+RUN mkdir -p /data/lancedb && chown -R node:node /data
+
+USER node
+
 CMD ["npx", "tsx", "index.ts"]

@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "documentation-reader-mcp.fullname" . }}
+  labels:
+    {{- include "documentation-reader-mcp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "documentation-reader-mcp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "documentation-reader-mcp.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "documentation-reader-mcp.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # stdio MCP server — keep stdin/tty open so the process stays alive
+          stdin: true
+          tty: true
+          envFrom:
+            - configMapRef:
+                name: {{ include "documentation-reader-mcp.fullname" . }}
+            - secretRef:
+                name: {{ include "documentation-reader-mcp.secretName" . }}
+          volumeMounts:
+            - name: lancedb-data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.docsVolume.enabled }}
+            - name: docs
+              mountPath: {{ .Values.docsVolume.mountPath }}
+              readOnly: true
+            {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: lancedb-data
+          {{- if .Values.lancedb.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "documentation-reader-mcp.fullname" . }}-lancedb
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.docsVolume.enabled }}
+        - name: docs
+          {{- if eq .Values.docsVolume.type "configMap" }}
+          configMap:
+            name: {{ .Values.docsVolume.name }}
+          {{- else if eq .Values.docsVolume.type "persistentVolumeClaim" }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.docsVolume.name }}
+          {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

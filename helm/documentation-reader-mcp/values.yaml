@@ -1,0 +1,85 @@
+replicaCount: 1
+
+image:
+  repository: documentation-reader-mcp
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Non-sensitive environment variables
+env:
+  # GitHub source (leave empty to skip)
+  GITHUB_OWNER: ""
+  GITHUB_REPO: ""
+  GITHUB_BRANCH: "main"
+  GITHUB_DOCS_PATH: "docs"
+
+  # GitLab source (leave empty to skip)
+  GITLAB_HOST: "https://gitlab.com"
+  GITLAB_NAMESPACE: ""
+  GITLAB_REPO: ""
+  GITLAB_BRANCH: "main"
+  GITLAB_DOCS_PATH: "docs"
+
+  # Local fallback (used only when remote sources are unreachable)
+  DOCS_FOLDER: "docs"
+
+  # Sync interval in minutes — blob SHAs are compared so only changed files are fetched
+  SYNC_INTERVAL_MINUTES: "60"
+
+# Sensitive credentials — stored in a Kubernetes Secret
+secrets:
+  GITHUB_TOKEN: ""
+  GITLAB_TOKEN: ""
+
+# Use a pre-existing Secret instead of creating one
+existingSecret: ""
+
+# LanceDB persistent cache
+lancedb:
+  path: /data/lancedb
+  persistence:
+    enabled: true
+    size: 2Gi
+    storageClass: ""
+    annotations: {}
+
+# Mount custom docs from a ConfigMap or PVC (replaces the image's bundled docs)
+docsVolume:
+  enabled: false
+  type: configMap   # configMap | persistentVolumeClaim
+  name: ""
+  mountPath: /app/docs

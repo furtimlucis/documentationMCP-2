@@ -1,0 +1,21 @@
+{{- if .Values.lancedb.persistence.enabled -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "documentation-reader-mcp.fullname" . }}-lancedb
+  labels:
+    {{- include "documentation-reader-mcp.labels" . | nindent 4 }}
+  {{- with .Values.lancedb.persistence.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    - {{ .Values.lancedb.persistence.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.lancedb.persistence.size }}
+  {{- if .Values.lancedb.persistence.storageClass }}
+  storageClassName: {{ .Values.lancedb.persistence.storageClass | quote }}
+  {{- end }}
+{{- end }}

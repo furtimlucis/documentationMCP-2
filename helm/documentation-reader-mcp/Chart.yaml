@@ -1,0 +1,10 @@
+apiVersion: v2
+name: documentation-reader-mcp
+description: Documentation Reader MCP server — serves docs from GitHub, GitLab, or local filesystem over stdio transport
+type: application
+version: 0.1.0
+appVersion: "3.0.0"
+keywords:
+  - mcp
+  - documentation
+  - model-context-protocol
