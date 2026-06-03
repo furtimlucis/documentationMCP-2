@@ -365,12 +365,31 @@ function createMcpServer(): Server {
       if (count === 0) {
         return { content: [{ type: "text", text: "No docs cached yet — initial sync is in progress. Try again shortly." }] };
       }
-      const rows = (await docsTable.query().select(["filename", "source"]).toArray()) as DocRecord[];
-      const bySource = new Map<string, string[]>();
+
+      // Fetch only the lightweight columns — avoids pulling content for all rows
+      const rows = (await docsTable.query().select(["origin_file", "source"]).toArray()) as DocRecord[];
+
+      // Count entries per origin file
+      const originCounts = new Map<string, { source: string; count: number }>();
       for (const r of rows) {
-        if (!bySource.has(r.source)) bySource.set(r.source, []);
-        bySource.get(r.source)!.push(r.filename);
+        const entry = originCounts.get(r.origin_file);
+        if (entry) {
+          entry.count++;
+        } else {
+          originCounts.set(r.origin_file, { source: r.source, count: 1 });
+        }
       }
+
+      // Group by source, label JSONL files with their entry count
+      const bySource = new Map<string, string[]>();
+      for (const [originFile, { source, count }] of originCounts) {
+        if (!bySource.has(source)) bySource.set(source, []);
+        const label = originFile.endsWith(".jsonl")
+          ? `${originFile} (${count} entries)`
+          : originFile;
+        bySource.get(source)!.push(label);
+      }
+
       const lines: string[] = [];
       for (const [src, files] of bySource) lines.push(`[source: ${src}]`, ...files);
       return { content: [{ type: "text", text: lines.join("\n") }] };
