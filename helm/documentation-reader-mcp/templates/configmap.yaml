@@ -5,6 +5,8 @@ metadata:
   labels:
     {{- include "documentation-reader-mcp.labels" . | nindent 4 }}
 data:
+  TRANSPORT: {{ .Values.transport | quote }}
+  PORT: {{ .Values.port | quote }}
   GITHUB_OWNER: {{ .Values.env.GITHUB_OWNER | quote }}
   GITHUB_REPO: {{ .Values.env.GITHUB_REPO | quote }}
   GITHUB_BRANCH: {{ .Values.env.GITHUB_BRANCH | quote }}

@@ -39,6 +39,17 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
+# Transport mode: "sse" for HTTP/SSE (Kubernetes), "stdio" for local process
+transport: sse
+
+# Port the SSE server listens on
+port: 3100
+
+# Kubernetes Service configuration
+service:
+  type: ClusterIP
+  port: 3100
+
 # Non-sensitive environment variables
 env:
   # GitHub source (leave empty to skip)
@@ -47,7 +58,7 @@ env:
   GITHUB_BRANCH: "main"
   GITHUB_DOCS_PATH: "docs"
 
-  # GitLab source (leave empty to skip)
+  # GitLab source — set GITLAB_HOST to your internal instance URL
   GITLAB_HOST: "https://gitlab.com"
   GITLAB_NAMESPACE: ""
   GITLAB_REPO: ""
@@ -74,6 +85,7 @@ lancedb:
   persistence:
     enabled: true
     size: 2Gi
+    accessMode: ReadWriteOnce
     storageClass: ""
     annotations: {}
 

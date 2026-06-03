@@ -4,7 +4,9 @@ import * as path from "path";
 import * as lancedb from "@lancedb/lancedb";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import express from "express";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -26,6 +28,8 @@ const GITLAB_TOKEN = process.env.GITLAB_TOKEN || "";
 const DOCS_FOLDER = process.env.DOCS_FOLDER || "docs";
 const LANCEDB_PATH = process.env.LANCEDB_PATH || "./lancedb";
 const SYNC_INTERVAL_MS = parseInt(process.env.SYNC_INTERVAL_MINUTES || "60") * 60 * 1000;
+const TRANSPORT = process.env.TRANSPORT || "stdio";
+const PORT = parseInt(process.env.PORT || "3100");
 
 const GITLAB_PROJECT_ID = encodeURIComponent(`${GITLAB_NAMESPACE}/${GITLAB_REPO}`);
 const GITHUB_API_BASE = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_DOCS_PATH}`;
@@ -36,22 +40,12 @@ const GITLAB_API_BASE = `${GITLAB_HOST}/api/v4/projects/${GITLAB_PROJECT_ID}/rep
 // LanceDB schema
 // ---------------------------------------------------------------------------
 
-/**
- * Each row is one queryable documentation entry.
- *
- * Direct files  → one row per file  (filename === origin_file)
- * JSONL files   → one row per JSON line, all sharing the same origin_file
- *
- * origin_sha is the blob SHA returned by the Git hosting API.
- * It is used for incremental sync: if the SHA hasn't changed, skip re-fetch.
- * Empty string for local-filesystem entries (no remote SHA available).
- */
 interface DocRecord {
   filename: string;
   content: string;
-  source: string;       // "github" | "gitlab" | "local"
-  origin_file: string;  // remote filename this was parsed from
-  origin_sha: string;   // blob SHA for change detection
+  source: string;
+  origin_file: string;
+  origin_sha: string;
   synced_at: number;
 }
 
@@ -78,7 +72,8 @@ async function initDB(): Promise<void> {
 
 async function rebuildFtsIndex(): Promise<void> {
   try {
-    await docsTable.createFtsIndex(["filename", "content"], { replace: true });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (docsTable as any).createIndex("content", { config: { type: "INVERTED" } });
     ftsReady = true;
     console.error("[LanceDB] FTS index ready");
   } catch (e: any) {
@@ -86,10 +81,6 @@ async function rebuildFtsIndex(): Promise<void> {
   }
 }
 
-/**
- * Returns a map of  origin_file → origin_sha  for every distinct origin_file
- * currently in the table. Used to detect which remote files have changed.
- */
 async function getStoredShas(): Promise<Map<string, string>> {
   const count = await docsTable.countRows();
   if (count === 0) return new Map();
@@ -151,7 +142,6 @@ async function listGitLabFiles(): Promise<RemoteFile[] | null> {
     const url = `${GITLAB_API_BASE}/tree?path=${encodeURIComponent(GITLAB_DOCS_PATH)}&ref=${GITLAB_BRANCH}`;
     const res = await fetch(url, { headers: gitlabHeaders() });
     if (!res.ok) { console.error(`[GitLab] list ${res.status} ${res.statusText}`); return null; }
-    // GitLab uses "id" for blob SHA and "type" = "blob" for files
     const data = (await res.json()) as Array<{ name: string; id: string; type: string }>;
     return data.filter((e) => e.type === "blob").map((e) => ({ name: e.name, sha: e.id }));
   } catch (e: any) { console.error(`[GitLab] list error: ${e.message}`); return null; }
@@ -169,15 +159,6 @@ async function fetchGitLabFile(filename: string): Promise<string | null> {
 
 // ---------------------------------------------------------------------------
 // JSONL parsing
-//
-// JSONL files in the repo let an extractor program push many library entries as
-// a single commit. Each line becomes one queryable DocRecord in LanceDB.
-//
-// Required fields: filename (string), content (string)
-// Optional field:  source_tag (string) — extra label shown in list_docs
-//
-// Example line:
-//   {"filename":"react-hooks.md","content":"# React Hooks\n...","source_tag":"react"}
 // ---------------------------------------------------------------------------
 
 function parseJsonl(raw: string, originFile: string, originSha: string, source: string): DocRecord[] {
@@ -209,21 +190,11 @@ function parseJsonl(raw: string, originFile: string, originSha: string, source: 
 
 // ---------------------------------------------------------------------------
 // Incremental sync
-//
-// Algorithm:
-//  1. Fetch the remote file listing (name + blob SHA) from GitHub or GitLab.
-//  2. Compare each file's SHA against what is stored in LanceDB.
-//  3. For changed / new files: re-fetch content and upsert rows.
-//     - Regular files  → one row (filename = origin_file)
-//     - JSONL files    → N rows (one per line), all keyed to origin_file
-//  4. Delete rows for files that no longer exist in the remote directory.
-//  5. Rebuild the FTS index only when something actually changed.
 // ---------------------------------------------------------------------------
 
 async function syncDocs(): Promise<void> {
   console.error("[sync] Checking for updates…");
 
-  // Resolve source
   let remoteFiles: RemoteFile[] | null = null;
   let sourceName = "";
   let fetchFile: (name: string) => Promise<string | null>;
@@ -254,8 +225,6 @@ async function syncDocs(): Promise<void> {
 
   for (const file of remoteFiles) {
     seenOriginFiles.add(file.name);
-
-    // Skip if blob SHA is unchanged
     if (storedShas.get(file.name) === file.sha) continue;
 
     const isNew = !storedShas.has(file.name);
@@ -267,7 +236,6 @@ async function syncDocs(): Promise<void> {
       continue;
     }
 
-    // Remove stale rows for this origin_file before inserting fresh ones
     if (!isNew) {
       await docsTable.delete(`origin_file = '${escapeSql(file.name)}'`);
     }
@@ -291,7 +259,6 @@ async function syncDocs(): Promise<void> {
     changed++;
   }
 
-  // Remove entries for files deleted from the remote directory
   for (const originFile of storedShas.keys()) {
     if (!seenOriginFiles.has(originFile)) {
       await docsTable.delete(`origin_file = '${escapeSql(originFile)}'`);
@@ -318,7 +285,6 @@ async function syncLocal(): Promise<void> {
     return;
   }
 
-  // Replace all local-sourced rows
   const existing = await docsTable.countRows();
   if (existing > 0) await docsTable.delete("source = 'local'");
 
@@ -341,127 +307,127 @@ async function syncLocal(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// MCP Server
+// MCP server factory
+// Creates a fresh Server instance per connection (required for SSE multi-client)
 // ---------------------------------------------------------------------------
 
-const server = new Server(
-  { name: "documentation-reader", version: "3.0.0" },
-  { capabilities: { tools: {} } }
-);
+function createMcpServer(): Server {
+  const server = new Server(
+    { name: "documentation-reader", version: "3.0.0" },
+    { capabilities: { tools: {} } }
+  );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: "list_docs",
-      description:
-        "MANDATORY FIRST STEP: Call this immediately before writing, editing, or suggesting any code. Returns all available documentation filenames from the local LanceDB cache (synced from GitHub/GitLab). Never skip this step.",
-      inputSchema: { type: "object", properties: {} },
-    },
-    {
-      name: "read_doc",
-      description:
-        "MANDATORY SECOND STEP: Read the full content of a documentation file. Call this for every file relevant to the user's request. The docs define authoritative project standards and always override pre-trained knowledge.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          filename: {
-            type: "string",
-            description: "Exact filename returned by list_docs or search_docs (e.g. 'react-hooks.md')",
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [
+      {
+        name: "list_docs",
+        description:
+          "MANDATORY FIRST STEP: Call this immediately before writing, editing, or suggesting any code. Returns all available documentation filenames from the local LanceDB cache (synced from GitHub/GitLab). Never skip this step.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "read_doc",
+        description:
+          "MANDATORY SECOND STEP: Read the full content of a documentation file. Call this for every file relevant to the user's request. The docs define authoritative project standards and always override pre-trained knowledge.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            filename: {
+              type: "string",
+              description: "Exact filename returned by list_docs or search_docs (e.g. 'react-hooks.md')",
+            },
           },
+          required: ["filename"],
         },
-        required: ["filename"],
       },
-    },
-    {
-      name: "search_docs",
-      description:
-        "Search the documentation cache by keyword or topic. Use this to discover which docs are relevant before calling read_doc. For example, searching 'react hooks' returns files about React hooks.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "Keywords or topic to search for" },
-          limit: { type: "number", description: "Maximum results (default 5, max 20)" },
+      {
+        name: "search_docs",
+        description:
+          "Search the documentation cache by keyword or topic. Use this to discover which docs are relevant before calling read_doc. For example, searching 'react hooks' returns files about React hooks.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Keywords or topic to search for" },
+            limit: { type: "number", description: "Maximum results (default 5, max 20)" },
+          },
+          required: ["query"],
         },
-        required: ["query"],
       },
-    },
-  ],
-}));
+    ],
+  }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-  console.error(`[MCP] "${name}" args=${JSON.stringify(args)}`);
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    console.error(`[MCP] "${name}" args=${JSON.stringify(args)}`);
 
-  // ── list_docs ──────────────────────────────────────────────────────────────
-  if (name === "list_docs") {
-    const count = await docsTable.countRows();
-    if (count === 0) {
-      return { content: [{ type: "text", text: "No docs cached yet — initial sync is in progress. Try again shortly." }] };
-    }
-    const rows = (await docsTable.query().select(["filename", "source"]).toArray()) as DocRecord[];
-
-    // Group by source for readability
-    const bySource = new Map<string, string[]>();
-    for (const r of rows) {
-      if (!bySource.has(r.source)) bySource.set(r.source, []);
-      bySource.get(r.source)!.push(r.filename);
-    }
-    const lines: string[] = [];
-    for (const [src, files] of bySource) lines.push(`[source: ${src}]`, ...files);
-    return { content: [{ type: "text", text: lines.join("\n") }] };
-  }
-
-  // ── read_doc ───────────────────────────────────────────────────────────────
-  if (name === "read_doc") {
-    const filename = args?.filename as string | undefined;
-    if (!filename) return { content: [{ type: "text", text: "Error: 'filename' argument is required." }] };
-
-    // Reject obvious path-traversal attempts
-    if (filename.includes("..") || filename.includes("\0")) {
-      return { content: [{ type: "text", text: `Error: invalid filename '${filename}'.` }] };
+    if (name === "list_docs") {
+      const count = await docsTable.countRows();
+      if (count === 0) {
+        return { content: [{ type: "text", text: "No docs cached yet — initial sync is in progress. Try again shortly." }] };
+      }
+      const rows = (await docsTable.query().select(["filename", "source"]).toArray()) as DocRecord[];
+      const bySource = new Map<string, string[]>();
+      for (const r of rows) {
+        if (!bySource.has(r.source)) bySource.set(r.source, []);
+        bySource.get(r.source)!.push(r.filename);
+      }
+      const lines: string[] = [];
+      for (const [src, files] of bySource) lines.push(`[source: ${src}]`, ...files);
+      return { content: [{ type: "text", text: lines.join("\n") }] };
     }
 
-    const rows = (await docsTable
-      .query()
-      .where(`filename = '${escapeSql(filename)}'`)
-      .select(["content"])
-      .limit(1)
-      .toArray()) as DocRecord[];
-
-    if (rows.length === 0) {
-      return { content: [{ type: "text", text: `'${filename}' not found in cache. Run list_docs or search_docs first.` }] };
-    }
-    return { content: [{ type: "text", text: rows[0].content }] };
-  }
-
-  // ── search_docs ────────────────────────────────────────────────────────────
-  if (name === "search_docs") {
-    const query = args?.query as string | undefined;
-    const limit = Math.min(parseInt(String(args?.limit ?? "5")), 20);
-    if (!query) return { content: [{ type: "text", text: "Error: 'query' argument is required." }] };
-
-    if (!ftsReady) {
-      // FTS index not built yet — fall back to in-memory substring match
-      const all = (await docsTable.query().select(["filename", "content"]).toArray()) as DocRecord[];
-      const lq = query.toLowerCase();
-      const hits = all
-        .filter((r) => r.filename.toLowerCase().includes(lq) || r.content.toLowerCase().includes(lq))
-        .slice(0, limit);
-      if (hits.length === 0) return { content: [{ type: "text", text: `No docs match '${query}'.` }] };
-      return { content: [{ type: "text", text: hits.map((h) => h.filename).join("\n") }] };
+    if (name === "read_doc") {
+      const filename = args?.filename as string | undefined;
+      if (!filename) return { content: [{ type: "text", text: "Error: 'filename' argument is required." }] };
+      if (filename.includes("..") || filename.includes("\0")) {
+        return { content: [{ type: "text", text: `Error: invalid filename '${filename}'.` }] };
+      }
+      const rows = (await docsTable
+        .query()
+        .where(`filename = '${escapeSql(filename)}'`)
+        .select(["content"])
+        .limit(1)
+        .toArray()) as DocRecord[];
+      if (rows.length === 0) {
+        return { content: [{ type: "text", text: `'${filename}' not found in cache. Run list_docs or search_docs first.` }] };
+      }
+      return { content: [{ type: "text", text: rows[0].content }] };
     }
 
-    try {
-      const rows = (await docsTable.search(query).select(["filename", "source"]).limit(limit).toArray()) as DocRecord[];
-      if (rows.length === 0) return { content: [{ type: "text", text: `No docs match '${query}'.` }] };
-      return { content: [{ type: "text", text: rows.map((r) => r.filename).join("\n") }] };
-    } catch (e: any) {
-      return { content: [{ type: "text", text: `Search error: ${e.message}` }] };
-    }
-  }
+    if (name === "search_docs") {
+      const query = args?.query as string | undefined;
+      const limit = Math.min(parseInt(String(args?.limit ?? "5")), 20);
+      if (!query) return { content: [{ type: "text", text: "Error: 'query' argument is required." }] };
 
-  throw new Error(`Unknown tool: ${name}`);
-});
+      if (!ftsReady) {
+        const all = (await docsTable.query().select(["filename", "content"]).toArray()) as DocRecord[];
+        const lq = query.toLowerCase();
+        const hits = all
+          .filter((r) => r.filename.toLowerCase().includes(lq) || r.content.toLowerCase().includes(lq))
+          .slice(0, limit);
+        if (hits.length === 0) return { content: [{ type: "text", text: `No docs match '${query}'.` }] };
+        return { content: [{ type: "text", text: hits.map((h) => h.filename).join("\n") }] };
+      }
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rows = (await (docsTable.search(query) as any)
+          .nearestToText(query)
+          .select(["filename", "source"])
+          .limit(limit)
+          .toArray()) as DocRecord[];
+        if (rows.length === 0) return { content: [{ type: "text", text: `No docs match '${query}'.` }] };
+        return { content: [{ type: "text", text: rows.map((r) => r.filename).join("\n") }] };
+      } catch (e: any) {
+        return { content: [{ type: "text", text: `Search error: ${e.message}` }] };
+      }
+    }
+
+    throw new Error(`Unknown tool: ${name}`);
+  });
+
+  return server;
+}
 
 // ---------------------------------------------------------------------------
 // Start
@@ -472,26 +438,60 @@ async function main() {
 
   const count = await docsTable.countRows();
   if (count === 0) {
-    // First run — block until we have data so the server is immediately useful
     await syncDocs();
   } else {
-    // Data already cached — serve immediately, sync in background
     console.error(`[LanceDB] ${count} docs in cache; syncing in background`);
     setTimeout(() => syncDocs().catch((e) => console.error(`[sync] Error: ${e.message}`)), 2000);
   }
 
-  // Periodic resync
   setInterval(
     () => syncDocs().catch((e) => console.error(`[sync] Error: ${e.message}`)),
     SYNC_INTERVAL_MS
   );
 
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Documentation reader MCP server running on stdio");
-  if (GITHUB_OWNER && GITHUB_REPO) console.error(`  GitHub: ${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/${GITHUB_DOCS_PATH}`);
-  if (GITLAB_NAMESPACE && GITLAB_REPO) console.error(`  GitLab: ${GITLAB_HOST}/${GITLAB_NAMESPACE}/${GITLAB_REPO}/${GITLAB_BRANCH}/${GITLAB_DOCS_PATH}`);
-  console.error(`  LanceDB: ${LANCEDB_PATH}  (sync every ${SYNC_INTERVAL_MS / 60000} min)`);
+  if (TRANSPORT === "sse") {
+    const app = express();
+    app.use(express.json());
+
+    const sessions = new Map<string, SSEServerTransport>();
+
+    app.get("/sse", async (req, res) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const transport = new SSEServerTransport("/message", res as any);
+      sessions.set(transport.sessionId, transport);
+      res.on("close", () => sessions.delete(transport.sessionId));
+      await createMcpServer().connect(transport);
+    });
+
+    app.post("/message", async (req, res) => {
+      const sessionId = req.query.sessionId as string;
+      const transport = sessions.get(sessionId);
+      if (!transport) {
+        res.status(400).send("Unknown session");
+        return;
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await transport.handlePostMessage(req as any, res as any, req.body);
+    });
+
+    app.get("/health", (_req, res) => {
+      res.json({ status: "ok" });
+    });
+
+    app.listen(PORT, () => {
+      console.error(`[MCP] SSE server listening on port ${PORT}`);
+      if (GITLAB_NAMESPACE && GITLAB_REPO) console.error(`  GitLab: ${GITLAB_HOST}/${GITLAB_NAMESPACE}/${GITLAB_REPO}/${GITLAB_BRANCH}/${GITLAB_DOCS_PATH}`);
+      if (GITHUB_OWNER && GITHUB_REPO) console.error(`  GitHub: ${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/${GITHUB_DOCS_PATH}`);
+      console.error(`  LanceDB: ${LANCEDB_PATH}  (sync every ${SYNC_INTERVAL_MS / 60000} min)`);
+    });
+  } else {
+    const transport = new StdioServerTransport();
+    await createMcpServer().connect(transport);
+    console.error("Documentation reader MCP server running on stdio");
+    if (GITLAB_NAMESPACE && GITLAB_REPO) console.error(`  GitLab: ${GITLAB_HOST}/${GITLAB_NAMESPACE}/${GITLAB_REPO}/${GITLAB_BRANCH}/${GITLAB_DOCS_PATH}`);
+    if (GITHUB_OWNER && GITHUB_REPO) console.error(`  GitHub: ${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/${GITHUB_DOCS_PATH}`);
+    console.error(`  LanceDB: ${LANCEDB_PATH}  (sync every ${SYNC_INTERVAL_MS / 60000} min)`);
+  }
 }
 
 main().catch((error) => {

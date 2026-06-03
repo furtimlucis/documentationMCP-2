@@ -1,257 +1,227 @@
 # Documentation Reader MCP Server
 
-A cross-platform MCP (Model Context Protocol) server that provides AI assistants with access to project documentation hosted on **GitHub**, **GitLab** (cloud or self-hosted), or the local filesystem. Works with **Gemini CLI**, **Claude CLI**, **Claude Desktop**, and any MCP-compatible client via stdio transport.
+An MCP (Model Context Protocol) server that syncs documentation from an internal GitLab instance (or GitHub) into a local [LanceDB](https://lancedb.github.io/lancedb/) cache and exposes it to Claude Code via `list_docs`, `search_docs`, and `read_doc` tools.
 
-## Setup
-
-1. Install dependencies:
-
-   ```bash
-   npm install
-   ```
-
-2. Copy the environment template and fill in your values:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-   Edit `.env` with your source details. Configure **either or both** — the server tries GitHub first, then GitLab, then falls back to the local filesystem.
-
-   **GitHub:**
-   ```env
-   GITHUB_OWNER=your-github-username
-   GITHUB_REPO=your-repo-name
-   GITHUB_BRANCH=main
-   GITHUB_DOCS_PATH=docs
-   GITHUB_TOKEN=              # optional — raises API rate limits
-   ```
-
-   **GitLab (cloud or self-hosted):**
-   ```env
-   GITLAB_HOST=https://gitlab.com   # change for self-hosted instances
-   GITLAB_NAMESPACE=your-namespace
-   GITLAB_REPO=your-repo-name
-   GITLAB_BRANCH=main
-   GITLAB_DOCS_PATH=docs
-   GITLAB_TOKEN=              # optional — raises API rate limits
-   ```
-
-   **Local fallback:**
-   ```env
-   DOCS_FOLDER=docs
-   ```
-
-3. Place your documentation files in the `docs` folder (or set `DOCS_FOLDER` to a different path).
-
-4. Start the server:
-
-   ```bash
-   npm start
-   ```
-
-## Tools
-
-- **`list_docs`** — Lists all files in the documentation folder. Fetches from GitHub first, then GitLab, then falls back to local.
-- **`read_doc`** — Reads the content of a specified documentation file. Same source priority: GitHub → GitLab → local.
+When a developer asks Claude to write code, Claude automatically searches the cache and reads the relevant docs before responding — ensuring it follows internal standards instead of relying solely on its training data.
 
 ---
 
-## Adding the MCP Server to Your AI Client
+## How it works
 
-### Gemini CLI
-
-Register the server from your project directory:
-
-**Option A — Direct (npm/tsx):**
-
-```bash
-# No extra setup needed — .gemini.json in the project root auto-registers the server.
-# Just run Gemini CLI from the project directory:
-gemini
+```
+Internal GitLab repo          LanceDB cache           Claude Code
+  (docs/*.md, *.jsonl)  →→→  (on disk / PVC)  →→→  MCP tools
+       ^                           |
+       |   periodic sync           |  search_docs / read_doc
+       └───────────────────────────┘
 ```
 
-**Option B — Docker:**
+1. On startup the server fetches every file under `GITLAB_DOCS_PATH` and compares blob SHAs — only changed or new files are re-fetched.
+2. Plain files (`.md`, `.txt`, etc.) become one LanceDB row each. `.jsonl` files are split into one row per line, allowing a single commit to push hundreds of entries.
+3. Claude Code connects to the server and calls the MCP tools before writing any code.
 
-Add the server to your global Gemini settings at `~/.gemini/settings.json`:
+The server supports two transports:
 
-```jsonc
-{
-  "mcpServers": {
-    "documentation_reader": {
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "--env-file", "C:\\path\\to\\documentationMCP-2\\.env",
-        "documentation-reader-mcp"
-      ]
-    }
-  }
-}
-```
-
-> **Note:** Replace `C:\\path\\to\\documentationMCP-2\\.env` with the absolute path to your `.env` file. On Windows use double backslashes.
-
-Verify with `/mcp` inside Gemini CLI — you should see `🟢 documentation_reader - Ready`.
+| Mode | Transport | Use case |
+|---|---|---|
+| `stdio` | Local child process | Local development |
+| `sse` | HTTP + Server-Sent Events | Kubernetes / shared VM deployment |
 
 ---
 
-### Claude CLI (Claude Code)
-
-Register the server from your project directory:
-
-**Option A — Direct (npm/tsx):**
+## Local development (stdio)
 
 ```bash
-claude mcp add -s local documentation-reader-mcp -- npx tsx index.ts
+cp .env.example .env
+# fill in GITLAB_* values (see Configuration reference below)
+npm install
+npm start
 ```
 
-**Option B — Docker:**
+Register with Claude Code once:
 
 ```bash
-claude mcp add -s local documentation-reader-mcp -- docker run -i --rm --env-file /path/to/.env documentation-reader-mcp
-```
-
-> **Tip:** Use `-s user` instead of `-s local` to make the server available in all projects, not just this one.
-
-Verify the server is connected:
-
-```bash
-claude mcp list
-```
-
-You should see:
-
-```
-documentation-reader-mcp: docker run -i --rm ... - ✓ Connected
-```
-
-Then launch Claude CLI and type `/mcp` to confirm the server is listed.
-
----
-
-### Claude Desktop
-
-Add the following to your Claude Desktop config file:
-
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-
-You can also open it via **Claude Desktop → Settings → Developer → Edit Config**.
-
-#### Option 1: Direct (npm/tsx)
-
-```json
-{
-  "mcpServers": {
-    "documentation-reader": {
-      "command": "npx",
-      "args": ["tsx", "index.ts"],
-      "cwd": "C:\\path\\to\\documentationMCP-2",
-      "env": {
-        "DOCS_FOLDER": "docs"
-      }
-    }
-  }
-}
-```
-
-> **Note**: Replace `C:\\path\\to\\documentationMCP-2` with the actual absolute path to this project. On Windows, use double backslashes.
-
-#### Option 2: Docker
-
-```json
-{
-  "mcpServers": {
-    "documentation-reader": {
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "--env-file", "C:\\path\\to\\documentationMCP-2\\.env",
-        "documentation-reader-mcp"
-      ]
-    }
-  }
-}
-```
-
-Build the Docker image first: `docker build -t documentation-reader-mcp .`
-
----
-
-### Other MCP Clients (VS Code, Cursor, etc.)
-
-This server uses **stdio transport**, which is the standard MCP transport. Any MCP-compatible client can connect by running:
-
-```bash
-npx tsx index.ts
-```
-
-or via Docker:
-
-```bash
-docker run -i --rm --env-file .env documentation-reader-mcp
+claude mcp add -s user documentation-reader \
+  -e "DOTENV_CONFIG_PATH=$PWD/.env" \
+  -e "LANCEDB_PATH=$PWD/lancedb" \
+  -e "DOCS_FOLDER=$PWD/docs" \
+  -- node node_modules/tsx/dist/cli.mjs index.ts
 ```
 
 ---
 
-## Docker
+## Deploying to Kubernetes (airgapped / internal GitLab)
 
-Build the image:
+### 1 — Build and push the image
+
+Build and push to your internal registry:
+
+```bash
+docker build -t your-registry.internal/documentation-reader-mcp:latest .
+docker push your-registry.internal/documentation-reader-mcp:latest
+```
+
+### 2 — Create a values override file
+
+```yaml
+# my-values.yaml
+image:
+  repository: your-registry.internal/documentation-reader-mcp
+  tag: latest
+
+env:
+  GITLAB_HOST: "https://gitlab.your-company.internal"
+  GITLAB_NAMESPACE: "your-group"
+  GITLAB_REPO: "your-docs-repo"
+  GITLAB_BRANCH: "main"
+  GITLAB_DOCS_PATH: "docs"
+
+secrets:
+  GITLAB_TOKEN: "glpat-xxxxxxxxxxxxxxxxxxxx"
+
+lancedb:
+  persistence:
+    enabled: true
+    storageClass: "your-storage-class"   # omit to use cluster default
+```
+
+### 3 — Install with Helm
+
+```bash
+helm install documentation-reader \
+  ./helm/documentation-reader-mcp \
+  -f my-values.yaml \
+  --namespace tools \
+  --create-namespace
+```
+
+The pod starts in `TRANSPORT=sse` mode (the default) and listens on port `3100`. The Helm chart creates a `ClusterIP` Service automatically.
+
+### 4 — Connect Claude Code on each developer machine
+
+Developers need a route to the pod. Two options:
+
+**Option A — `kubectl port-forward` (simplest, no Ingress needed)**
+
+```bash
+kubectl port-forward -n tools \
+  svc/documentation-reader-documentation-reader-mcp 3100:3100
+```
+
+Run this in a background terminal (or add it to your login shell), then register once per machine:
+
+```bash
+claude mcp add -s user --transport sse \
+  documentation-reader http://localhost:3100/sse
+```
+
+**Option B — Ingress or NodePort**
+
+Set `service.type: NodePort` (or configure an Ingress) in your values override so the service is reachable at a stable hostname, then:
+
+```bash
+claude mcp add -s user --transport sse \
+  documentation-reader http://docs-mcp.your-company.internal/sse
+```
+
+---
+
+## Updating docs
+
+Push new or updated files to the GitLab repo under `GITLAB_DOCS_PATH`. The server polls every `SYNC_INTERVAL_MINUTES` (default 60) and picks up changes automatically by comparing blob SHAs.
+
+To trigger an immediate sync without waiting, restart the pod:
+
+```bash
+kubectl rollout restart deployment/documentation-reader-documentation-reader-mcp -n tools
+```
+
+---
+
+## JSONL format
+
+For bulk documentation (API references, component libraries, etc.), push a `.jsonl` file where each line is one entry:
+
+```jsonl
+{"filename":"Button.md","content":"# Button\nProps: ...","source_tag":"design-system"}
+{"filename":"Input.md","content":"# Input\nProps: ...","source_tag":"design-system"}
+```
+
+Required fields: `filename` (string), `content` (string).
+Optional: `source_tag` (string) — appears as the source label in `list_docs` output.
+
+---
+
+## MCP tools
+
+| Tool | When Claude calls it |
+|---|---|
+| `list_docs` | Mandatory first step before writing any code — returns all cached filenames grouped by source |
+| `search_docs` | Keyword/topic search across filenames and content |
+| `read_doc` | Reads the full content of a specific doc |
+
+---
+
+## Configuration reference
+
+| Variable | Default | Description |
+|---|---|---|
+| `TRANSPORT` | `stdio` | `stdio` for local dev, `sse` for Kubernetes |
+| `PORT` | `3100` | HTTP port when `TRANSPORT=sse` |
+| `GITLAB_HOST` | `https://gitlab.com` | Base URL of your GitLab instance |
+| `GITLAB_NAMESPACE` | — | GitLab group or username |
+| `GITLAB_REPO` | — | Repository name |
+| `GITLAB_BRANCH` | `main` | Branch to sync from |
+| `GITLAB_DOCS_PATH` | `docs` | Folder inside the repo containing docs |
+| `GITLAB_TOKEN` | — | Personal access token (read_api scope) |
+| `GITHUB_OWNER` | — | GitHub org or username (optional fallback) |
+| `GITHUB_REPO` | — | GitHub repository name |
+| `GITHUB_TOKEN` | — | GitHub personal access token |
+| `LANCEDB_PATH` | `./lancedb` | Where the LanceDB files are stored |
+| `DOCS_FOLDER` | `docs` | Local fallback folder when no remote is configured |
+| `SYNC_INTERVAL_MINUTES` | `60` | How often to poll GitLab/GitHub for changes |
+
+---
+
+## Helm chart reference
+
+Key values:
+
+| Value | Default | Description |
+|---|---|---|
+| `transport` | `sse` | Transport mode — passed to the container as `TRANSPORT` |
+| `port` | `3100` | Container and Service port |
+| `service.type` | `ClusterIP` | Kubernetes Service type (`ClusterIP`, `NodePort`, `LoadBalancer`) |
+| `lancedb.persistence.enabled` | `true` | Persist the LanceDB cache across pod restarts |
+| `lancedb.persistence.size` | `2Gi` | PVC size |
+| `lancedb.persistence.storageClass` | `""` | Leave blank for cluster default |
+| `existingSecret` | `""` | Name of a pre-existing Secret containing `GITLAB_TOKEN` / `GITHUB_TOKEN` |
+| `docsVolume.enabled` | `false` | Mount docs from a ConfigMap or PVC instead of syncing from GitLab |
+| `env.GITLAB_HOST` | `https://gitlab.com` | Set to your internal GitLab URL |
+
+---
+
+## Docker (standalone)
+
+Build:
 
 ```bash
 docker build -t documentation-reader-mcp .
 ```
 
-Run with your `.env` file:
+Run in SSE mode (same as Kubernetes):
 
 ```bash
-docker run -i --rm --env-file .env documentation-reader-mcp
+docker run --rm \
+  -p 3100:3100 \
+  --env-file .env \
+  -e TRANSPORT=sse \
+  -v lancedb-data:/data/lancedb \
+  documentation-reader-mcp
 ```
 
-To use a custom docs folder, mount it as a volume:
+Then connect Claude Code:
 
 ```bash
-docker run -i --rm --env-file .env -v /path/to/your/docs:/app/docs documentation-reader-mcp
+claude mcp add -s user --transport sse documentation-reader http://localhost:3100/sse
 ```
-
-> **Important:** The `.env` file is excluded from the Docker image via `.dockerignore`. You must pass it at runtime with `--env-file` or set variables individually with `-e`.
-
-## Environment Variables
-
-Configure these in your `.env` file (see `.env.example` for a template). Leave a provider's variables blank to skip it entirely.
-
-**GitHub**
-
-| Variable | Default | Description |
-|---|---|---|
-| `GITHUB_OWNER` | _(none)_ | GitHub username or organization |
-| `GITHUB_REPO` | _(none)_ | Repository name |
-| `GITHUB_BRANCH` | `main` | Branch to fetch docs from |
-| `GITHUB_DOCS_PATH` | `docs` | Path to the docs directory within the repo |
-| `GITHUB_TOKEN` | _(none)_ | Optional — personal access token to raise API rate limits |
-
-**GitLab**
-
-| Variable | Default | Description |
-|---|---|---|
-| `GITLAB_HOST` | `https://gitlab.com` | GitLab instance URL — change for self-hosted |
-| `GITLAB_NAMESPACE` | _(none)_ | GitLab username or group |
-| `GITLAB_REPO` | _(none)_ | Repository name |
-| `GITLAB_BRANCH` | `main` | Branch to fetch docs from |
-| `GITLAB_DOCS_PATH` | `docs` | Path to the docs directory within the repo |
-| `GITLAB_TOKEN` | _(none)_ | Optional — personal access token (`glpat-…`) to raise API rate limits |
-
-**Local fallback**
-
-| Variable | Default | Description |
-|---|---|---|
-| `DOCS_FOLDER` | `docs` | Local docs directory (relative to project root) |
-
-## Example
-
-After configuring the server in your AI client, the assistant can:
-
-1. Call `list_docs` to discover available documentation files
-2. Call `read_doc` with a filename to read its contents
-3. Use the documentation to ground its code suggestions in your project's actual standards
